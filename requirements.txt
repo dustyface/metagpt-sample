@@ -1,0 +1,7 @@
+metagpt==0.6.0
+asyncio
+playwright
+aiocron
+# bug: https://github.com/aio-libs/aiohttp/issues/6239
+# 如果针对3.8.0版本, proxy设定存在bug
+aiohttp==3.7.4

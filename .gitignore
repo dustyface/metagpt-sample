@@ -1,0 +1,10 @@
+.DS_Store
+logs/
+.venv/
+__pycache__
+*.pyc
+workspace/
+key.yaml
+generated_doc/
+.env
+nohup.out
