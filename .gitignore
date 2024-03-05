@@ -5,3 +5,5 @@ __pycache__
 *.pyc
 workspace/
 key.yaml
+generated_doc/
+.env

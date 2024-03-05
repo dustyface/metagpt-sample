@@ -18,6 +18,7 @@ class SimpleWriteCode(Action):
     def __init__(self, name = "SimpleWriteCode", context=None, llm=None):
         super().__init__(name=name, context=context, llm=llm)
 
+    # 被role的_act()方法调用
     async def run(self, instruction):
         prompt = self.PROMPT_TEMPLATE.format(instruction=instruction)
         rsp = await self._aask(prompt)
@@ -46,14 +47,14 @@ class RunnableCoder(Role):
         super().__init__(name=name, profile=profile, **kwargs)
         self._init_actions([SimpleWriteCode, SimpleRunCode])
         self._set_react_mode(react_mode="by_order")
-    
+
+    # 1. 在react_mode是by_order的情况下, 这个_act()方法，会被Role多次调用, 每次在进入它执行之前
+    # 通过self._set_state设定action的上下文
     async def _act(self):
         logger.info(f"{self._setting}: prepare to run {self.rc.todo}")
         todo = self.rc.todo
         message = self.get_memories(k=1)[0]
         # 执行action
-        # action = asyncio.create_task(todo.run(message.content))
-        # result = await action
         result = await todo.run(message.content)
         print(f"runnable result={result}")
         message = Message(content=result, role=self.profile, cause_by=type(todo))
