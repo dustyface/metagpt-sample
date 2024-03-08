@@ -13,6 +13,7 @@ from metagpt.utils.parse_html import WebPage
 from metagpt.tools import WebBrowserEngineType
 from metagpt.subscription import SubscriptionRunner
 from uuid import uuid4
+from subprocess import Popen,PIPE,STDOUT
 
 # ActionNode的keyword param的含义，和prompt的6个方面的含义一致；
 LANGUAGE = ActionNode(
@@ -156,7 +157,7 @@ The outline of the HTML page is as follows:
 class WriteCrawleCode(Action):
     async def run(self, requirements) -> str:
         requirement: Message = requirements[-1]
-        data = requirement.instruct_content.dict()
+        data = requirement.instruct_content.model_dump()
         urls = data['Crawler URL List']
         query = data['Page Content Extraction']
 
@@ -175,57 +176,32 @@ class WriteCrawleCode(Action):
         code = CodeParser.parse_code(block="", text=code_rsp)
         return code
 
-# 这个action的执行，是在ParseSubRequirement action和WriteCrawleCode action之后,
+# 这个action的执行，是在 ParseSubRequirement action和WriteCrawleCode action之后,
 # 是在得到结构化需求和生成extract用户所需的content的爬虫代码parse之后，它生成订阅Runner所执行的任务，即爬取url, 执行parse得到用户关心的需求内容, 并和LLM交互得到总结后的答案;
 class RunSubscription(Action):
     # @message: Role.rc.history, 是list[Message]类型
     async def run(self, messages: list[Message]):
-        code = messages[-1].content  # last message: WriteCrawleCode run return "{url}\n{parsed code}"
-        req = messages[-2].instruct_content.dict()
+        code = messages[-1].content  # last message: WriteCrawleCode run return "# {url}\n{parsed code}"
+        req = messages[-2].instruct_content.model_dump()
         urls = req['Crawler URL List']
         process = req['Crawle Post Processing']
         spec = req['Cron Expression']
-        # SubscriptionRunner所执行到action
-        SubAction = self.create_sub_action_cls(urls, code, process)
-        # type(name: str, bases: Tuple[Type], namespace: Dict[str, Any]), can create a type dynamically
-        # Note: 不能在namespace 参数里定义属性，否则报错, 参考: https://docs.pydantic.dev/2.5/errors/usage_errors/#model-field-overridden
-        SubRole = type("SubRole", (Role,), {})
-        role = SubRole()
-        role._init_actions([SubAction])
-        runner = SubscriptionRunner()
 
-        async def callback(msg):
-            print(msg)
+        # start a new process to run the subscription
+        spawn_subprocess(urls, code, process, spec)
+        return Message(content="RunSubscription done")
 
-        await runner.subscribe(role, CronTrigger(spec), callback)
-        await runner.run()
-    
-    @staticmethod
-    def create_sub_action_cls(urls: list[str], code, process):
-        print(f"create_sub_action_cls urls={urls}, code={code}, process={process}")
-        modules = {}
-        for url in urls[::-1]:
-            code, current = code.rsplit(f"# {url}", maxsplit=1)
-            name = uuid4().hex
-            module = type(sys)(name)
-            # 把parse function定义为moduled的function
-            exec(current, module.__dict__)
-        modules[url] = module
+def spawn_subprocess(urls, code, process, spec, *, file_path="./src/adv_subscriptor/worker.py"):
+    p = Popen(["python", file_path, str(urls), code, process, spec], stdout=PIPE, stderr=STDOUT)
+    # using nohup to record output in file
+    # Popen(["nohup", "python", file_path, str(urls), code, process, spec])
 
-        class SubAction(Action):
-            async def run(self, *args, **kwargs):
-                pages = await WebBrowserEngine().run(*urls)
-                if len(urls) == 1:
-                    pages = [pages]
-                
-                data = []
-                for url, page in zip(urls, pages):
-                    # getattr 是builtin.pyi中function, 
-                    data.append(getattr(modules[url], "parse")(page.soup))
-                # SubAction 根据parse 抓取的内容，回答用户的Post Processing requirements
-                return await self.llm.aask(TEMPLATE_SUB_ACTION.format(process=process, data=data))
+    # read the output of the subprocess
+    for line in iter(p.stdout.readline, b""):
+        print(line.decode(), end="")
+    p.stdout.close()
+    p.wait()
 
-        return SubAction
 
 class CrawleEngineer(Role):
     name: str = "Henter"
@@ -273,49 +249,7 @@ class SubscriptionAssistant(Role):
         self.rc.memory.add(message)
         return message
 
-# TRIGGER_INTERVAL = 10
-TRIGGER_INTERVAL = 86400
-
-async def CronTrigger(cron_exp: str):
-    while True:
-        yield Message(content="CroneTrigger")
-        await asyncio.sleep(TRIGGER_INTERVAL)
-
 if __name__ == "__main__":
-    async def test():
-        action = ParseSubRequirement()
-        requirements = [Message(content="从36kr创投平台https://pitchhub.36kr.com/financing-flash 爬取所有初创企业融资的信息，获取标题，链接， 时间，总结今天的融资新闻，然后在晚上七点半送给我")]
-        result = await action.run(requirements)
-        print(result.instruct_content.dict())  # instruct_content is a dict
-
-        cls = ActionNode.create_model_class("ActionModel", {
-            "Cron Expression": (str, ...),
-            "Crawler URL List": (list[str], ...),
-            "Page Content Extraction": (str, ...),
-            "Crawle Post Processing": (str, ...),
-        })
-        code = await WriteCrawleCode().run([Message(content="", instruct_content=cls(**result.instruct_content.dict()))])
-        print("code=", code)
-        # check the code execution
-        urls = result.instruct_content.dict()['Crawler URL List']
-        process = result.instruct_content.dict()['Crawle Post Processing']
-        modules = {}
-        for url in urls[::-1]:
-            parse_code = code.rsplit(f"# {url}", maxsplit=1)[1]
-            name = uuid4().hex
-            module = type(sys)(name)
-            # 把parse function定义为moduled的function
-            exec(parse_code, module.__dict__)
-            modules[url] = module
-        # load the page
-        pages = await WebBrowserEngine().run(*urls)
-        if len(urls) == 1:
-            pages = [pages]
-        for url, page in zip(urls, pages):
-            # getattr 是builtin.pyi中function, 
-            data = getattr(modules[url], "parse")(page.soup)
-            print("data=", data, "process=", process)
-
     async def main():
         team = Team()
         team.hire([SubscriptionAssistant(), CrawleEngineer()])

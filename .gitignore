@@ -7,3 +7,4 @@ workspace/
 key.yaml
 generated_doc/
 .env
+nohup.out
